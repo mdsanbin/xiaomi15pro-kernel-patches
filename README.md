@@ -36,13 +36,21 @@ Apply with `git am patches/*.patch`.
 
 ## Verification (Xiaomi 15 Pro, haotian)
 
-Single-variable A/B: same source commit, same `.config` (final configs differ by
-exactly the margin line), same toolchain, shim enabled in both.
+Every row below is flash-tested on the device. Within a pair the only difference
+is the margin base; the two trees are independent source trees (Xiaomi's
+`piano` 6.6.142 tree and a pure AOSP `android15-6.6.144_r00` tree), and the
+toolchain is AOSP clang r510928 in all of them.
 
-| | margin base 32 (upstream) | margin base 65 (this patch, default) |
-|---|---|---|
-| empty-locale id | `0x200d0000` | **`0`** |
-| boot | stuck at 2nd screen, adb reachable | **`sys.boot_completed=1`** |
+| tree | LTO | margin base | empty-locale id | boot |
+|---|---|---|---|---|
+| piano 6.6.142 | none | 32 (upstream) | `0x200d0000` | stuck at 2nd screen, adb reachable |
+| piano 6.6.142 | none | **65 (this patch)** | **`0`** | **`sys.boot_completed=1`** |
+| pure AOSP 6.6.144 | none | 32 (upstream) | `0x200d0000` | stuck at 2nd screen, adb reachable |
+| pure AOSP 6.6.144 | none | **65 (this patch)** | **`0`** | **`sys.boot_completed=1`** |
+| pure AOSP 6.6.144 | thin | **65 (this patch)** | **`0`** | **`sys.boot_completed=1`**, 616 modules |
+
+The same one-line change behaves identically on both trees, so the fix is not
+tied to a vendor tree, and not to a specific optimisation setting either.
 
 Runtime evidence at margin 65 (dmesg):
 
@@ -57,6 +65,11 @@ Regression check: `sha256sum` of every file in `/system/lib64` (928 files) and
 `/system/bin` (443 files) matches the stock baseline file-by-file (0 mismatches,
 0 unexpected files).
 
+Vendor modules load normally: `/proc/modules` lists 616 modules, matching the
+stock baseline entry for entry, and dmesg contains no
+`disagrees about version of symbol`, `Unknown symbol` or
+`module verification failed` lines.
+
 ## Limits (what is *not* proven here)
 
 * The effective margin (65) is measured at runtime, but the `docopy` decision
@@ -67,13 +80,36 @@ Regression check: `sha256sum` of every file in `/system/lib64` (928 files) and
   actual return value versus the destination capacity is not captured. The
   "3 bytes lost" statement comes from a byte-wise comparison of the decoded
   output; it is **not** a claim of an out-of-bounds write.
+* The crash signature is not identical across trees: the pure-AOSP runs crashed
+  in `FontFamily::FontFamily()` / `FontFamily::create()` in `libminikin.so`,
+  while the earlier piano-tree runs crashed on the `LocaleListCache` /
+  `getIdInternal` path. Both arms do show the same corrupted empty-locale id
+  (`0x200d0000`); whether that is one causal chain or one corrupt value consumed
+  at two different sites is not settled here.
 
 ## Build
 
     TC=/path/to/clang/bin OUT=/path/to/fresh-out K=/path/to/kernel ./scripts/build_image.sh
 
-The configuration baseline in `config/` is the exact `.config` used for the
-verified build. LTO must stay disabled (`LTO_NONE`); do not enable ThinLTO.
+`config/haotian_6.6.142_base.config` is the exact `.config` of the verified
+6.6.142 build. It is a baseline rather than a portable config: for another tree
+or version, run `make olddefconfig` and expect Kconfig-driven differences (the
+6.6.142 and 6.6.144 trees differ in about 221 lines, mostly vendor platform
+symbols).
+
+The verified build used the AOSP clang r510928 (18.0.0) toolchain. The
+tool-version lines at the top of a `.config` (`CONFIG_CC_VERSION_TEXT`,
+`CONFIG_CLANG_VERSION`, `CONFIG_AS_VERSION`, `CONFIG_LLD_VERSION`) are
+auto-detected and are rewritten by `olddefconfig`, so building with a different
+clang silently restamps them.
+
+LTO: `LTO_NONE` is what was verified here, but ThinLTO has since also been
+verified on the device. The exported-symbol CRC tables are byte-for-byte
+identical under the two modes (`__kcrctab` 24532 B and `__kcrctab_gpl` 42320 B),
+which is expected since the CRCs are produced by `genksyms` from preprocessed
+sources and do not depend on LTO; the ThinLTO build boots with the same 616
+modules and no symbol-version errors. ThinLTO is therefore not a hard
+requirement.
 
 ## Packing / flashing
 
