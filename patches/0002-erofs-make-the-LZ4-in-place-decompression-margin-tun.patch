@@ -1,0 +1,145 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mdsanbin <mdsanbin@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 20:53:10 +0800
+Subject: [PATCH] erofs: make the LZ4 in-place decompression margin tunable
+ (default 65)
+
+Stock Xiaomi kernels raise the in-place LZ4 safety margin base from upstream's
+32 to 65 and expose it through the z_erofs_get_lz4_decompress_inplace_margin
+boot parameter.
+
+With the upstream base of 32, the boundary pcluster of libminikin.so
+(inputsize 4096, omargin 50) is decoded in place. The vendor accelerated LZ4
+(lz4asm), which takes over decoding via android_vh_lz4_decompress_bypass, then
+produces a corrupt output: the decoded content loses exactly 3 bytes starting
+at output offset 2048. That corrupts the cached id of the empty locale in
+libminikin and the boot hangs at the second screen.
+
+Make the base tunable the same way (default 65) so boundary pclusters take the
+docopy path. Verified on Xiaomi 15 Pro (haotian): with 65 the empty-locale id
+is correct (0) and the kernel boots to sys.boot_completed=1.
+---
+ fs/erofs/decompressor.c | 76 ++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 72 insertions(+), 4 deletions(-)
+
+diff --git a/fs/erofs/decompressor.c b/fs/erofs/decompressor.c
+index 8f672a760..84216d247 100644
+--- a/fs/erofs/decompressor.c
++++ b/fs/erofs/decompressor.c
+@@ -6,6 +6,8 @@
+ #include "compress.h"
+ #include <linux/module.h>
+ #include <linux/lz4.h>
++#include <linux/kstrtox.h>
++#include <linux/init.h>
+ #include <trace/hooks/lz4_decompress.h>
+ 
+ #ifndef LZ4_DISTANCE_MAX	/* history window size */
+@@ -13,8 +15,48 @@
+ #endif
+ 
+ #define LZ4_MAX_DISTANCE_PAGES	(DIV_ROUND_UP(LZ4_DISTANCE_MAX, PAGE_SIZE) + 1)
++/*
++ * In-place decompression safety margin base.
++ *
++ * Upstream mainline uses a fixed "+ 32".  Stock Xiaomi kernels raise the base
++ * to 65 and expose it via the "z_erofs_get_lz4_decompress_inplace_margin"
++ * kernel boot parameter, because the vendor accelerated LZ4 decoder (lz4asm)
++ * is not safe when the input and output buffers overlap.  A larger margin
++ * makes boundary pclusters fall back to the "docopy" path.  Default 65 to
++ * match stock behaviour.
++ */
++static unsigned int z_erofs_inplace_margin = 65;
++static int z_erofs_inplace_margin_debug = 1;
++static int z_erofs_margin_dbg_n;
++
++static int __init z_erofs_inplace_margin_setup(char *str)
++{
++	unsigned int v;
++
++	if (!str || kstrtouint(str, 0, &v)) {
++		pr_err("erofs: invalid inplace margin parameter\n");
++		return 0;
++	}
++	z_erofs_inplace_margin = v;
++	pr_info("erofs: erofs lz4 decompress implace margin: %d\n", v);
++	return 1;
++}
++__setup("z_erofs_get_lz4_decompress_inplace_margin=", z_erofs_inplace_margin_setup);
++
++static int __init z_erofs_inplace_margin_debug_setup(char *str)
++{
++	unsigned int v = 1;
++
++	if (str)
++		kstrtouint(str, 0, &v);
++	z_erofs_inplace_margin_debug = !!v;
++	return 1;
++}
++__setup("z_erofs_inplace_margin_debug=", z_erofs_inplace_margin_debug_setup);
++
+ #ifndef LZ4_DECOMPRESS_INPLACE_MARGIN
+-#define LZ4_DECOMPRESS_INPLACE_MARGIN(srcsize)  (((srcsize) >> 8) + 32)
++#define LZ4_DECOMPRESS_INPLACE_MARGIN(srcsize) \
++	(((srcsize) >> 8) + z_erofs_inplace_margin)
+ #endif
+ 
+ struct z_erofs_lz4_decompress_ctx {
+@@ -128,17 +170,31 @@ static void *z_erofs_lz4_handle_overlap(struct z_erofs_lz4_decompress_ctx *ctx,
+ 			int *maptype, bool may_inplace)
+ {
+ 	struct z_erofs_decompress_req *rq = ctx->rq;
+-	unsigned int omargin, total, i;
++	unsigned int omargin, margin, total, i;
+ 	struct page **in;
+ 	void *src, *tmp;
+ 
+ 	if (rq->inplace_io) {
+ 		omargin = PAGE_ALIGN(ctx->oend) - ctx->oend;
++		margin = LZ4_DECOMPRESS_INPLACE_MARGIN(rq->inputsize);
+ 		if (rq->partial_decoding || !may_inplace ||
+ 		    ctx->outpages < ctx->inpages ||
+-		    omargin < LZ4_DECOMPRESS_INPLACE_MARGIN(rq->inputsize))
++		    omargin < margin) {
++			if (z_erofs_inplace_margin_debug &&
++			    z_erofs_margin_dbg_n++ < 64)
++				pr_info("erofs-margin-dbg: in=%u omargin=%u margin=%u part=%d may=%d outp=%u inp=%u -> docopy\n",
++					rq->inputsize, omargin, margin,
++					rq->partial_decoding, may_inplace,
++					ctx->outpages, ctx->inpages);
+ 			goto docopy;
+-
++		}
++		if (z_erofs_inplace_margin_debug &&
++		    z_erofs_margin_dbg_n++ < 64)
++			pr_info("erofs-margin-dbg: in=%u omargin=%u margin=%u part=%d may=%d outp=%u inp=%u -> inplace\n",
++				rq->inputsize, omargin, margin,
++				rq->partial_decoding, may_inplace,
++				ctx->outpages, ctx->inpages);
++		
+ 		for (i = 0; i < ctx->inpages; ++i)
+ 			if (rq->out[ctx->outpages - ctx->inpages + i] !=
+ 			    rq->in[i])
+@@ -257,6 +313,10 @@ static int z_erofs_lz4_decompress_mem(struct z_erofs_lz4_decompress_ctx *ctx,
+ 					  rq->inputsize, rq->outputsize);
+ 
+ bypass_decompression:
++	if (z_erofs_inplace_margin_debug && z_erofs_margin_dbg_n++ < 64)
++		pr_info("erofs-lz4-dbg: in=%u out=%u ret=%d maptype=%d bypass=%d\n",
++			rq->inputsize, rq->outputsize, ret, maptype,
++			lz4_decompression_bypass);
+ 	if (ret != rq->outputsize) {
+ 		erofs_err(rq->sb, "failed to decompress %d in[%u, %u] out[%u]",
+ 			  ret, rq->inputsize, inputmargin, rq->outputsize);
+@@ -464,3 +524,11 @@ int z_erofs_parse_cfgs(struct super_block *sb, struct erofs_super_block *dsb)
+ 	erofs_put_metabuf(&buf);
+ 	return ret;
+ }
++
++static int __init z_erofs_inplace_margin_report(void)
++{
++	pr_info("erofs: erofs lz4 decompress implace margin: %d\n",
++		z_erofs_inplace_margin);
++	return 0;
++}
++late_initcall(z_erofs_inplace_margin_report);
