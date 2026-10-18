@@ -7,7 +7,7 @@ set -e
 K=${K:-/path/to/kernel/tree}
 OUT=${OUT:?set OUT to a fresh output directory}
 TC=${TC:?set TC to a clang bin dir}
-BASE=${BASE:-$(dirname "$0")/../config/haotian_6.6.142_base.config}
+BASE=${BASE:-$(dirname "$0")/../config/haotian_6.6.144_aosp.config}
 ARCH=arm64 LLVM=1 LLVM_IAS=1
 export ARCH LLVM LLVM_IAS
 export PATH="$TC:$PATH"

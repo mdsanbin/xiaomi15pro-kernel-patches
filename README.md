@@ -1,13 +1,14 @@
 # Xiaomi 15 Pro (haotian) kernel patches
 
-Patches for a custom 6.6.142 GKI kernel for the Xiaomi 15 Pro (haotian),
-plus the exact build configuration baseline and a build script.
+Patches for a custom GKI kernel for the Xiaomi 15 Pro (haotian). Verified on
+both Xiaomi's `piano` 6.6.142 tree and a pure AOSP `android15-6.6.144_r00` tree,
+together with build configuration baselines and a build script.
 
 ## Root cause of the "stuck at the second screen" / libminikin corruption
 
-Custom 6.6.142 builds hung at the second boot screen, and a locale test binary
-reported `locale='' id=0x200d0000` where the stock kernel reports `0`
-(537722880 vs 0).
+Custom builds hung at the second boot screen, and a locale test binary reported
+`locale='' id=0x200d0000` where the stock kernel reports `0` (537722880 vs 0).
+First seen on 6.6.142, later reproduced on a pure AOSP 6.6.144 tree.
 
 The cause is the EROFS **LZ4 in-place decompression safety margin**:
 
@@ -91,25 +92,35 @@ stock baseline entry for entry, and dmesg contains no
 
     TC=/path/to/clang/bin OUT=/path/to/fresh-out K=/path/to/kernel ./scripts/build_image.sh
 
-`config/haotian_6.6.142_base.config` is the exact `.config` of the verified
-6.6.142 build. It is a baseline rather than a portable config: for another tree
-or version, run `make olddefconfig` and expect Kconfig-driven differences (the
-6.6.142 and 6.6.144 trees differ in about 221 lines, mostly vendor platform
-symbols).
+Two baselines are provided, each the exact `.config` of a build that was
+flash-tested on the device:
 
-The verified build used the AOSP clang r510928 (18.0.0) toolchain. The
+| config | tree | LTO |
+|---|---|---|
+| `config/haotian_6.6.144_aosp.config` (**default**, used by the script) | pure AOSP `android15-6.6.144_r00` | `LTO_CLANG_THIN` |
+| `config/haotian_6.6.142_piano.config` | Xiaomi `piano` 6.6.142 | `LTO_NONE` |
+
+They are baselines rather than portable configs: for another tree or version,
+run `make olddefconfig` and expect Kconfig-driven differences (the 6.6.142 and
+6.6.144 trees differ in about 221 lines, mostly vendor platform symbols).
+
+The margin base does **not** come from the config — it is patch 0002, a source
+change — so a build needs the patches applied; alternatively pass
+`z_erofs_get_lz4_decompress_inplace_margin=65` on the kernel command line.
+
+The verified builds used the AOSP clang r510928 (18.0.0) toolchain. The
 tool-version lines at the top of a `.config` (`CONFIG_CC_VERSION_TEXT`,
 `CONFIG_CLANG_VERSION`, `CONFIG_AS_VERSION`, `CONFIG_LLD_VERSION`) are
 auto-detected and are rewritten by `olddefconfig`, so building with a different
 clang silently restamps them.
 
-LTO: `LTO_NONE` is what was verified here, but ThinLTO has since also been
-verified on the device. The exported-symbol CRC tables are byte-for-byte
-identical under the two modes (`__kcrctab` 24532 B and `__kcrctab_gpl` 42320 B),
-which is expected since the CRCs are produced by `genksyms` from preprocessed
-sources and do not depend on LTO; the ThinLTO build boots with the same 616
-modules and no symbol-version errors. ThinLTO is therefore not a hard
-requirement.
+LTO is not a hard requirement: the exported-symbol CRC tables are byte-for-byte
+identical under `LTO_NONE` and `LTO_CLANG_THIN` (`__kcrctab` 24532 B and
+`__kcrctab_gpl` 42320 B), which is expected since `genksyms` derives the CRCs
+from preprocessed sources, and the ThinLTO build boots with the same 616 modules
+and no symbol-version errors. To switch modes, flip two lines: `CONFIG_LTO_NONE=y`
+off, and `CONFIG_LTO_CLANG_THIN=y` on (`CONFIG_LTO` / `CONFIG_LTO_CLANG` are
+hidden symbols that `olddefconfig` fills in).
 
 ## Packing / flashing
 
