@@ -32,6 +32,7 @@ pclusters then take the `docopy` path instead.
 | 0001 | `mm: add memfd ashmem compatibility shim` |
 | 0002 | `erofs: make the LZ4 in-place decompression margin tunable (default 65)` |
 | 0003 | `certs: keep key_pass declared without USE_PKCS11_ENGINE` |
+| 0004 | `genksyms: keep capability-gated __counted_by out of the GKI symbol CRCs` |
 
 Apply with `git am patches/*.patch`.
 
@@ -128,3 +129,30 @@ Not shipped here. The boot image was produced by wrapping the `Image` with
 `mkbootimg` (header v4, kernel only) and re-attaching the **stock-signed**
 vbmeta blob plus the AVB footer; the Xiaomi ABL still verifies that vbmeta
 blob, so a self-signed one will not boot.
+
+## Exported-symbol CRCs (GKI ABI invariant)
+
+The GKI ABI is fixed by the Android reference build: every exported symbol's
+`__crc_*` value must match it exactly, or prebuilt vendor modules refuse to load
+(`disagrees about version of symbol ...` / `Unknown symbol ...`).
+
+On clang >= 19.1.3 the Kconfig gate `CONFIG_CC_HAS_COUNTED_BY` turns `__counted_by`
+from an empty macro into `__attribute__((__counted_by__(member)))`. Because
+`struct icc_path { ... struct icc_req reqs[] __counted_by(num_nodes); }` uses it,
+`genksyms` folded the attribute into the type and drifted **14 of 16713** CRCs
+(`icc_set_bw` `0x54401b7c` -> `0x912111d7`). `qcom-scm.ko` then failed to load
+and Q6/ADSP never came up, which hangs the boot (dead at ~10.7 s).
+
+Patch 0004 expands such capability-gated type attributes to nothing under
+`__GENKSYMS__`, while the real compiler still receives them, so the CRCs stay at
+the reference values and the hardening is kept. The CRCs are independent of the
+compiler version and of the LTO mode, so one baseline covers clang 18/20/21/22
+and both `LTO_NONE` and `LTO_CLANG_THIN`.
+
+`config/gki_crc_baseline.txt` is that reference set (16713 symbols) and
+`scripts/crc_tool.py` checks a build against it:
+
+    python3 scripts/crc_tool.py gate <out>/vmlinux config/gki_crc_baseline.txt
+
+`scripts/build_image.sh` runs this automatically after `make Image` and fails on
+any drift. Set `CRC_GATE=0` to skip it.
