@@ -212,3 +212,26 @@ the symbol:
     affected_modules=23: arm_smmu, camera, clk-qcom, cnss2, ..., qcom-scm, ...
 
 That number is the one that decides whether the device boots.
+
+## Reproducible build kit (`kit/`)
+
+`kit/` is a self-contained reproduction bundle: the seven changed source files
+as **full copies** (not patches, so nothing depends on patch context), lib/zstd
+1.5.7 vendored with its single 6.6 adaptation (`linux/unaligned.h` ->
+`asm/unaligned.h`), a `zstdn` crypto backend sharing the same library, the
+AnyKernel3 template, `mkbootimg.py` / `repack-stock-avb.py`, the device-derived
+CRC baseline, and the runtime tune module that switches zram to `zstdn`.
+
+    K=/path/aosp_gki_6.6.144 OUT=/path/out TC=/path/llvm-22/bin \
+        STOCK_BOOT=/path/stock_boot.img ./kit/build_all.sh
+
+`kit/apply.sh` applies the sources, `kit/verify.sh` re-checks them against the
+build (CRC gate, zstdn registration, Image hashes). The kit was validated by
+rebuilding on the tree and comparing the result: the Image sha256 reproduced
+exactly (`85fd8766a9628715b369b8272ed910d517f5baca5e83bd74e060c31b6e6d5bd3`).
+
+See `kit/README.md` (Chinese) for prerequisites, the three commands, and the
+hard constraints learned on the device -- notably: never turn `zram`/`zsmalloc`
+into `=y`, because the `vendor_boot` ramdisk still `insmod`s them from
+`modules.load` and a failure there truncates first-stage module loading.
+
