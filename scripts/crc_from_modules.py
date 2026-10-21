@@ -260,6 +260,21 @@ def main():
                 f.write("%s\t0x%08x\n" % (nm, kernel_req[nm]))
         print("wrote           = %s (%d symbols)" % (out_path, len(kernel_req)))
 
+        # Companion index: for every symbol the kernel must provide, which
+        # shipped modules demand it.  crc_tool.py reads this next to the
+        # baseline so a gate failure can name the modules that will not load.
+        imp_index = {}
+        for name, syms in by_name.items():
+            for s in syms & set(kernel_req):
+                imp_index.setdefault(s, []).append(name)
+        imp_path = os.path.splitext(out_path)[0] + ".importers.txt"
+        with open(imp_path, "w") as f:
+            f.write("# symbol<TAB>comma-separated shipped modules that demand it\n")
+            f.write("# from the kernel; generated next to the CRC baseline.\n")
+            for nm in sorted(imp_index):
+                f.write("%s\t%s\n" % (nm, ",".join(sorted(imp_index[nm]))))
+        print("wrote           = %s (%d symbols)" % (imp_path, len(imp_index)))
+
 
 if __name__ == "__main__":
     main()

@@ -21,6 +21,9 @@ the kernel ABI and cannot cause a load failure.
 Usage:
   crc_tool.py dump <vmlinux>                 # print "name<TAB>0xCRC", sorted
   crc_tool.py gate <vmlinux> <baseline.txt>  # exit 1 if anything differs
+
+If "<baseline>.importers.txt" exists next to the baseline (crc_from_modules.py
+writes it), a failure also names the shipped modules that would refuse to load.
 """
 import struct
 import sys
@@ -86,6 +89,34 @@ def read_baseline(path):
     return base
 
 
+def read_importers(baseline):
+    """Optional companion index written by crc_from_modules.py: symbol -> the
+    shipped modules that demand it from the kernel.  Lets a failure name the
+    modules that would refuse to load instead of only the symbol."""
+    import os
+
+    path = os.path.splitext(baseline)[0] + ".importers.txt"
+    if not os.path.exists(path):
+        return {}
+    out = {}
+    for line in open(path):
+        line = line.rstrip("\n")
+        if not line or line.startswith("#"):
+            continue
+        nm, mods = line.split("\t", 1)
+        out[nm] = [m for m in mods.split(",") if m]
+    return out
+
+
+def describe_modules(names, limit=4):
+    if not names:
+        return ""
+    shown = ", ".join(names[:limit])
+    if len(names) > limit:
+        shown += ", +%d" % (len(names) - limit)
+    return "  [%s]" % shown
+
+
 def main():
     if len(sys.argv) < 3:
         raise SystemExit(__doc__)
@@ -98,22 +129,33 @@ def main():
     if cmd == "gate":
         cur = load_crc(sys.argv[2])
         base = read_baseline(sys.argv[3])
+        imp = read_importers(sys.argv[3])
         only_c = set(cur) - set(base)
         only_b = set(base) - set(cur)
         diff = [k for k in cur if k in base and cur[k] != base[k]]
         print("vmlinux      : %s" % sys.argv[2])
-        print("baseline     : %s" % sys.argv[3])
+        print("baseline     : %s%s" % (sys.argv[3],
+                                       "" if imp else " (no importers index)"))
         print("baseline_syms=%d current_syms=%d" % (len(base), len(cur)))
         print("only_in_current=%d only_in_baseline=%d DIFFERENT_CRC=%d"
               % (len(only_c), len(only_b), len(diff)))
         for k in sorted(diff)[:40]:
-            print("  %-40s current=0x%08x baseline=0x%08x"
-                  % (k, cur[k], base[k]))
+            print("  %-40s current=0x%08x baseline=0x%08x%s"
+                  % (k, cur[k], base[k], describe_modules(imp.get(k))))
         # Extras are not listed: against the vendor baseline most of the tree's
         # export set is "extra" by design, and against the full baseline they
         # are still harmless.  Only the count matters.
         for k in sorted(only_b)[:20]:
-            print("  -  %s" % k)
+            print("  -  %s%s" % (k, describe_modules(imp.get(k))))
+        # Which modules would actually refuse to load.  This is the number that
+        # decides whether the device boots, so it is reported separately.
+        affected = sorted({m for k in list(diff) + sorted(only_b)
+                           for m in imp.get(k, [])})
+        if affected:
+            shown = ", ".join(affected[:20])
+            if len(affected) > 20:
+                shown += ", +%d" % (len(affected) - 20)
+            print("affected_modules=%d: %s" % (len(affected), shown))
         # Policy:
         #   DIFFERENT_CRC  -> FAIL: a symbol a prebuilt vendor module links
         #                     against changed type; that module will refuse

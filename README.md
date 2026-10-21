@@ -202,3 +202,13 @@ clang >= 19 `__counted_by` drift described above fails the build.
 device (read-only) and re-run the script. Because the baseline only encodes
 what the modules demand, it stays valid across compiler versions and LTO modes,
 and only needs refreshing after a vendor/OTA module update.
+
+The generator also writes `vendor_crc_baseline.importers.txt` next to it
+(`symbol -> modules that demand it`). `crc_tool.py` picks it up automatically,
+so a failure reports the modules that would actually refuse to load, not just
+the symbol:
+
+    icc_set_bw   current=0x54401b7c baseline=0xdeadbeef  [arm_smmu, camera, ...]
+    affected_modules=23: arm_smmu, camera, clk-qcom, cnss2, ..., qcom-scm, ...
+
+That number is the one that decides whether the device boots.
