@@ -1,10 +1,22 @@
 #!/usr/bin/env python3
 """CRC (symbol-version) gate for GKI kernels.
 
-The Android GKI ABI is defined by the reference build: every exported symbol's
-`__crc_*` value must match it exactly, or prebuilt vendor modules refuse to load
-("disagrees about version of symbol ...").  This tool lets a build be checked
-against a stored baseline so any CRC drift fails the build.
+The Android GKI ABI is defined by the prebuilt modules shipped on the device:
+every symbol they demand through their __versions section must exist in the
+kernel with exactly the recorded CRC, or they refuse to load ("disagrees about
+version of symbol ...").  This tool checks a build against a stored baseline so
+any drift fails the build.
+
+Two baselines are supported, both in "name<TAB>0xCRC" form:
+
+  config/vendor_crc_baseline.txt  device-derived: only the symbols vendor
+                                  modules must get from the kernel.  Default.
+  config/gki_crc_baseline.txt     full reference export set of the tree.
+
+The vendor baseline is the stricter one in intent (it is literally what the
+modules ask for) and far quieter in practice, because symbols the modules
+supply to each other -- and every symbol no module imports -- are not part of
+the kernel ABI and cannot cause a load failure.
 
 Usage:
   crc_tool.py dump <vmlinux>                 # print "name<TAB>0xCRC", sorted
@@ -97,14 +109,32 @@ def main():
         for k in sorted(diff)[:40]:
             print("  %-40s current=0x%08x baseline=0x%08x"
                   % (k, cur[k], base[k]))
-        for k in sorted(only_c)[:20]:
-            print("  +  %s" % k)
+        # Extras are not listed: against the vendor baseline most of the tree's
+        # export set is "extra" by design, and against the full baseline they
+        # are still harmless.  Only the count matters.
         for k in sorted(only_b)[:20]:
             print("  -  %s" % k)
-        if diff or only_c or only_b:
-            print("CRC_GATE: FAIL")
-            sys.exit(1)
-        print("CRC_GATE: PASS")
+        # Policy:
+        #   DIFFERENT_CRC  -> FAIL: a symbol a prebuilt vendor module links
+        #                     against changed type; that module will refuse
+        #                     to load ("disagrees about version of symbol").
+        #   only_in_baseline -> FAIL: a symbol vendor modules expect is gone.
+        #   only_in_current  -> WARN: symbols we added ourselves. Prebuilt
+        #                     modules cannot reference symbols that did not
+        #                     exist when they were built, so this is harmless.
+        failures = []
+        if diff:
+                failures.append("%d exported symbol(s) changed CRC" % len(diff))
+        if only_b:
+                failures.append("%d baseline symbol(s) missing" % len(only_b))
+        if failures:
+                print("CRC_GATE: FAIL (%s)" % "; ".join(failures))
+                sys.exit(1)
+        if only_c:
+                print("CRC_GATE: PASS (warning: %d new exported symbol(s), harmless "
+                      "for prebuilt modules)" % len(only_c))
+        else:
+                print("CRC_GATE: PASS")
         return
     raise SystemExit("unknown command: %s" % cmd)
 

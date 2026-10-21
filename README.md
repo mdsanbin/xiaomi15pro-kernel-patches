@@ -156,3 +156,49 @@ and both `LTO_NONE` and `LTO_CLANG_THIN`.
 
 `scripts/build_image.sh` runs this automatically after `make Image` and fails on
 any drift. Set `CRC_GATE=0` to skip it.
+
+### Device-derived baseline (default)
+
+A full-tree reference says what *our* build exports; it does not say what the
+prebuilt modules actually ask for. The latter is the real constraint, and it
+can be read off the device:
+
+    scripts/crc_from_modules.py <module-dir> config/vendor_crc_baseline.txt \
+        [--loaded lsmod.txt] [--vmlinux <out>/vmlinux]
+
+Each `.ko` built with `CONFIG_MODVERSIONS` carries a `__versions` section
+(`struct modversion_info { unsigned long crc; char name[56]; }`, 64 B/entry):
+the CRCs it demands from the kernel at load time. The script unions those
+across every shipped module, subtracts the symbols that modules export to each
+other (these are satisfied inside the module set and are not kernel ABI), and
+keeps the rest as the must-match set.
+
+Getting the module set right matters. On this device it comes from three
+places, and the third is easy to miss:
+
+| source | `.ko` files |
+|---|---|
+| `/vendor_dlkm/lib/modules` (also reachable as `/vendor/lib/modules`) | 399 |
+| `/system_dlkm/lib/modules` (also reachable as `/system/lib/modules`) | 96 |
+| **`vendor_boot` ramdisk `/lib/modules`** -- first-stage modules, not on any mounted filesystem | 441 |
+
+The three sets overlap (many modules ship both in the ramdisk and in
+`vendor_dlkm`), so counts for `haotian` (OS 4.0.0.19) come out as:
+
+    modules_found   = 1032 files   (includes a flattened duplicate of /system_dlkm)
+    unique contents = 643          (389 byte-identical duplicates dropped)
+    required_symbols= 6438         demanded by some shipped module
+    module_provided = 5398         satisfied by another shipped module
+    kernel_required = 3967         must come from vmlinux
+
+Against the 6.6.144-Z-1.0.0 build: `missing_in_vmlinux = 0`,
+`DIFFERENT_CRC = 0`. The set is also small enough to stay quiet: symbol churn
+elsewhere in the tree can no longer trip the gate, while every CRC a module
+really checks is still enforced -- `icc_set_bw`, for instance, is in it, so the
+clang >= 19 `__counted_by` drift described above fails the build.
+
+`scripts/build_image.sh` uses this baseline by default; override with
+`CRC_BASELINE=<file>`. To regenerate it, re-pull the three directories from the
+device (read-only) and re-run the script. Because the baseline only encodes
+what the modules demand, it stays valid across compiler versions and LTO modes,
+and only needs refreshing after a vendor/OTA module update.
